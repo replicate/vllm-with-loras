@@ -285,7 +285,7 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-class LlamaForCausalLM(nn.Module):
+class LoraLlamaForCausalLM(nn.Module):
 
     def __init__(self, config):
         super().__init__()
@@ -318,7 +318,7 @@ class LlamaForCausalLM(nn.Module):
     ]
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
-    def load_loras(self, lora_config_path, lora_state_dict_path):
+    def load_lora(self, lora_config_path, lora_state_dict_path):
         # load configs
         lora_state_dict = torch.load(lora_state_dict_path)
         lora_config = json.load(lora_config_path)
@@ -334,6 +334,10 @@ class LlamaForCausalLM(nn.Module):
             v_lora_state_dict = {"loras": {"lora_A.weight": v_lora_A_weight, 'lora_B.weight': v_lora_B_weight}, "scaling": scaling, "dropout": dropout}
 
             layer.self_attn.load_lora(q_lora_state_dict, v_lora_state_dict)
+
+    def delete_lora(self):
+        for layer_idx, layer in enumerate(self.model.layers):
+            layer.self_attn.delete_lora()
 
     def load_weights(self,
                      model_name_or_path: str,
