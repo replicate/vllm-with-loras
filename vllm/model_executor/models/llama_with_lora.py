@@ -325,7 +325,14 @@ class LlamaForCausalLM(nn.Module):
 
         # assemble the final state dict
         for layer_idx, layer in enumerate(self.model.layers):
-            # TODO (Moin): modify this state dict and load it into the wrapper
+            q_lora_A_weight = lora_state_dict[f'base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_A.weight']
+            q_lora_B_weight = lora_state_dict[f'base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_B.weight']
+            q_lora_state_dict = {"loras": {"lora_A.weight": q_lora_A_weight, 'lora_B.weight': q_lora_B_weight}, "scaling": scaling, "dropout": dropout}
+
+            v_lora_A_weight = lora_state_dict[f'base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_A.weight']
+            v_lora_B_weight = lora_state_dict[f'base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_B.weight']
+            v_lora_state_dict = {"loras": {"lora_A.weight": v_lora_A_weight, 'lora_B.weight': v_lora_B_weight}, "scaling": scaling, "dropout": dropout}
+
             layer.self_attn.load_lora(q_lora_state_dict, v_lora_state_dict)
 
     def load_weights(self,
