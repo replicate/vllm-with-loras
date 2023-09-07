@@ -27,6 +27,7 @@ InputMetadata to extract the original 2D shape of the input.
 """
 from typing import List, Optional, Tuple
 
+import json
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -321,7 +322,8 @@ class LoraLlamaForCausalLM(nn.Module):
     def load_lora(self, lora_config_path, lora_state_dict_path):
         # load configs, map to CPU in case # of GPUs is variable
         lora_state_dict = torch.load(lora_state_dict_path, map_location="cpu")
-        lora_config = json.load(lora_config_path, map_location="cpu")
+        with open(lora_config_path, "r") as lora_config_file:
+            lora_config = json.load(lora_config_file) 
 
         # assemble the final state dict
         for layer_idx, layer in enumerate(self.model.layers):
