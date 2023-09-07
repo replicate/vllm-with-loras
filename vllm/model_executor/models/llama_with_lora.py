@@ -326,8 +326,8 @@ class LoraLlamaForCausalLM(nn.Module):
             lora_config = json.load(lora_config_file)
 
         # assemble the final state dict
-        scaling = lora_config['scaling']
-        dropout = lora_config['dropout']
+        dropout = lora_config['lora_dropout']
+        scaling = lora_config['lora_alpha'] / lora_config['r']
         for layer_idx, layer in enumerate(self.model.layers):
             q_lora_A_weight = lora_state_dict[f'base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_A.weight']
             q_lora_B_weight = lora_state_dict[f'base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_B.weight']
