@@ -153,9 +153,9 @@ class LlamaAttention(nn.Module):
         self.v_lora = None
 
     def load_lora(self, q_lora_state_dict, v_lora_state_dict):
-        # TODO (Moin): generalize this abstraction later on
-        self.q_lora = LinearLoRALayer.from_state_dict(q_lora_state_dict)
-        self.v_lora = LinearLoRALayer.from_state_dict(v_lora_state_dict)
+        # TODO (Moin): generalize this abstraction later on and allow flexible devices
+        self.q_lora = LinearLoRALayer.from_state_dict(q_lora_state_dict).to("cuda")
+        self.v_lora = LinearLoRALayer.from_state_dict(v_lora_state_dict).to("cuda")
 
     def delete_lora(self):
         self.q_lora = None
@@ -319,9 +319,9 @@ class LoraLlamaForCausalLM(nn.Module):
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
     def load_lora(self, lora_config_path, lora_state_dict_path):
-        # load configs
-        lora_state_dict = torch.load(lora_state_dict_path)
-        lora_config = json.load(lora_config_path)
+        # load configs, map to CPU in case # of GPUs is variable
+        lora_state_dict = torch.load(lora_state_dict_path, map_location="cpu")
+        lora_config = json.load(lora_config_path, map_location="cpu")
 
         # assemble the final state dict
         for layer_idx, layer in enumerate(self.model.layers):
