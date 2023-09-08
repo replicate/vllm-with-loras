@@ -319,11 +319,14 @@ class LoraLlamaForCausalLM(nn.Module):
     ]
     _row_parallel_weights = ["o_proj.weight", "down_proj.weight"]
 
-    def load_lora(self, lora_config_path, lora_state_dict_path):
+    def load_lora(self, lora_config, lora_state_dict):
         # load configs, map to CPU in case # of GPUs is variable
-        lora_state_dict = torch.load(lora_state_dict_path, map_location="cpu")
-        with open(lora_config_path, "r") as lora_config_file:
-            lora_config = json.load(lora_config_file)
+        if isinstance(lora_state_dict, str):
+            lora_state_dict = torch.load(lora_state_dict, map_location="cpu")
+
+        if isinstance(lora_config, str):
+            with open(lora_config, "r") as lora_config_file:
+                lora_config = json.load(lora_config_file)
 
         # assemble the final state dict
         dropout = lora_config['lora_dropout']
