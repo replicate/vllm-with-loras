@@ -82,10 +82,14 @@ class LlamaMLP(nn.Module):
 
 class LinearLoRALayer(nn.Module):
     def __init__(self, hidden_dim, rank, dropout, scaling):
-        self.lora_A = nn.Linear(hidden_dim, rank)
-        self.lora_B = nn.Linear(rank, hidden_dim)
+        super().__init__()
+        self.lora_A = nn.Linear(hidden_dim, rank, bias=False)
+        self.lora_B = nn.Linear(rank, hidden_dim, bias=False)
         self.scaling = scaling
-        self.dropout = nn.Dropout(dropout)
+        if dropout > 0.0:
+            self.dropout = nn.Dropout(dropout)
+        else:
+            self.dropout = nn.Identity()
 
     @classmethod
     def from_state_dict(cls, state_dict):
