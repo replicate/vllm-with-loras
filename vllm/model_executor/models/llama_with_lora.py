@@ -101,7 +101,7 @@ class LinearLoRALayer(nn.Module):
         dropout = state_dict['dropout']
         scaling = state_dict['scaling']
         lora_layer = cls(hidden_dim=hidden_dim, rank=rank, dropout=dropout, scaling=scaling)
-        lora_layer.load_state_dict(state_dict['loras'])
+        lora_layer.load_state_dict(state_dict['loras'], strict=True)
         return lora_layer
 
     def forward(self, x):
@@ -159,8 +159,8 @@ class LlamaAttention(nn.Module):
 
     def load_lora(self, q_lora_state_dict, v_lora_state_dict):
         # TODO (Moin): generalize this abstraction later on and allow flexible devices
-        self.q_lora = LinearLoRALayer.from_state_dict(q_lora_state_dict).to("cuda")
-        self.v_lora = LinearLoRALayer.from_state_dict(v_lora_state_dict).to("cuda")
+        self.q_lora = LinearLoRALayer.from_state_dict(q_lora_state_dict).to("cuda").half()
+        self.v_lora = LinearLoRALayer.from_state_dict(v_lora_state_dict).to("cuda").half()
 
     def delete_lora(self):
         self.q_lora = None
@@ -181,15 +181,19 @@ class LlamaAttention(nn.Module):
             # matrix multiplies have the tendency to overflow, so we have to be careful about datatypes here
             prev_q_dtype = q.dtype
             prev_v_dtype = v.dtype
+            # print("Previous datatype:", prev_q_dtype)
+            # print("New datatype:",  self.q_lora.lora_A.weight.dtype)
+            # print("Q datatype:", q.dtype)
+            # print("V datatype:", v.dtype)
 
-            q = q.to(self.q_lora.lora_A.weight.dtype)
-            v = q.to(self.v_lora.lora_A.weight.dtype)
+            # q = q.to(self.q_lora.lora_A.weight.dtype)
+            # v = q.to(self.v_lora.lora_A.weight.dtype)
 
             q += self.q_lora(q)
             v += self.v_lora(v)
 
-            q = q.to(prev_q_dtype)
-            v = v.to(prev_v_dtype)
+            # q = q.to(prev_q_dtype)
+            # v = v.to(prev_v_dtype)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
@@ -325,6 +329,7 @@ class LoraLlamaForCausalLM(nn.Module):
 
     def load_lora(self, lora_config, lora_state_dict):
         # load configs, map to CPU in case # of GPUs is variable
+        # import ipdb; ipdb.set_trace()
         if isinstance(lora_state_dict, str):
             lora_state_dict = torch.load(lora_state_dict, map_location="cpu")
 
@@ -350,11 +355,11 @@ class LoraLlamaForCausalLM(nn.Module):
         for layer_idx, layer in enumerate(self.model.layers):
             layer.self_attn.delete_lora()
 
+
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
-                     use_np_cache: bool = False,
-                     use_safetensor: bool = True):
+                     load_format: str = "auto"):
         tp_size = get_tensor_model_parallel_world_size()
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
         q_proj_shard_size = (self.config.hidden_size // tp_size)
@@ -371,7 +376,7 @@ class LoraLlamaForCausalLM(nn.Module):
         state_dict = self.state_dict()
 
         for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, use_np_cache, use_safetensor):
+                model_name_or_path, cache_dir, load_format):
             if "rotary_emb.inv_freq" in name:
                 continue
 
