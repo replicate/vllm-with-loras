@@ -20,7 +20,7 @@ async def _run_vllm(base_model_path: Path, lora_path: Path, prompt: str, max_new
     args = AsyncEngineArgs(
         model=base_model_path,
         tokenizer=tokenizer_path,
-        dtype="float16",
+        dtype="auto",
         max_num_seqs=16384,
     )
     engine = AsyncLLMEngine.from_engine_args(args)
