@@ -117,9 +117,9 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
 
-    def load_lora(self, lora_config_path, lora_state_dict_path):
+    def load_lora(self, lora_config, lora_state_dict):
         for worker in self.workers:
-            worker.model.load_lora(lora_config_path, lora_state_dict_path)
+            worker.model.load_lora(lora_config, lora_state_dict)
 
     def delete_lora(self):
         for worker in self.workers:
@@ -128,7 +128,8 @@ class LLMEngine:
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import \
+            Worker  # pylint: disable=import-outside-toplevel
 
         assert self.parallel_config.world_size == 1, (
             "Ray is required if parallel_config.world_size > 1.")
@@ -151,7 +152,8 @@ class LLMEngine:
                           **ray_remote_kwargs):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
-        from vllm.worker.worker import Worker  # pylint: disable=import-outside-toplevel
+        from vllm.worker.worker import \
+            Worker  # pylint: disable=import-outside-toplevel
 
         self.workers: List[Worker] = []
         for bundle in placement_group.bundle_specs:
@@ -436,7 +438,7 @@ class LLMEngine:
         all_finished_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
             eos_token_id=self.tokenizer.eos_token_id),
-                               reverse=True)
+            reverse=True)
         for seq, parent, is_new in all_finished_seqs[:beam_width]:
             if is_new:
                 # A newly generated child sequence finishes and has a high
@@ -464,7 +466,7 @@ class LLMEngine:
         running_child_seqs.sort(key=lambda x: x[0].get_beam_search_score(
             length_penalty=length_penalty,
             eos_token_id=self.tokenizer.eos_token_id),
-                                reverse=True)
+            reverse=True)
 
         # Check if we can stop the beam search.
         if len(running_child_seqs) == 0:
@@ -639,7 +641,7 @@ class LLMEngine:
              prefix_offset=seq.prefix_offset,
              read_offset=seq.read_offset,
              skip_special_tokens=True,
-         )
+        )
         if seq.tokens is None:
             seq.tokens = new_tokens
         else:
@@ -670,8 +672,8 @@ class LLMEngine:
             return
 
         # Check if the sequence has generated the EOS token.
-        if ((not sampling_params.ignore_eos)
-                and seq.get_last_token_id() == self.tokenizer.eos_token_id):
+        if ((not sampling_params.ignore_eos) and
+                seq.get_last_token_id() == self.tokenizer.eos_token_id):
             seq.status = SequenceStatus.FINISHED_STOPPED
             return
 

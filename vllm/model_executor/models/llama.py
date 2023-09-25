@@ -30,21 +30,20 @@ from typing import List, Optional, Tuple
 import torch
 from torch import nn
 from transformers import LlamaConfig
-
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantized_linear import ParallelLinear
+from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    VocabParallelEmbedding)
+from vllm.model_executor.parallel_utils.tensor_parallel import \
+    VocabParallelEmbedding
 from vllm.model_executor.quantization_utils import QuantizationConfig
 from vllm.model_executor.weight_utils import (
     convert_pyslice_to_tensor, hf_model_weights_iterator,
-    load_tensor_parallel_weights, load_padded_tensor_parallel_vocab)
+    load_padded_tensor_parallel_vocab, load_tensor_parallel_weights)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -82,6 +81,36 @@ class LlamaMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+
+class LinearLoRALayer(nn.Module):
+    def __init__(self, hidden_dim, rank, dropout, scaling):
+        super().__init__()
+        self.lora_A = nn.Linear(hidden_dim, rank, bias=False)
+        self.lora_B = nn.Linear(rank, hidden_dim, bias=False)
+        self.scaling = scaling
+        if dropout > 0.0:
+            self.dropout = nn.Dropout(dropout)
+        else:
+            self.dropout = nn.Identity()
+
+    @classmethod
+    def from_state_dict(cls, state_dict):
+        expected_keys = set(['loras', 'dropout', 'scaling'])
+        if state_dict.keys() != expected_keys:
+            raise ValueError(
+                f"Expected keys {expected_keys}, got {state_dict.keys()}")
+
+        rank, hidden_dim = state_dict['loras']['lora_A.weight'].shape
+        dropout = state_dict['dropout']
+        scaling = state_dict['scaling']
+        lora_layer = cls(hidden_dim=hidden_dim, rank=rank,
+                         dropout=dropout, scaling=scaling)
+        lora_layer.load_state_dict(state_dict['loras'], strict=True)
+        return lora_layer
+
+    def forward(self, x):
+        return self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
 
 
 class LlamaAttention(nn.Module):
@@ -133,6 +162,66 @@ class LlamaAttention(nn.Module):
                                            rotary_dim=self.head_dim,
                                            num_kv_heads=self.num_kv_heads)
 
+        self.q_lora = None
+        self.v_lora = None
+        self.merged = False
+        self.cached_qkv_proj = None
+        # TODO (Moin): expose this variable
+        self.merge_activations = False
+
+    def load_lora(self, q_lora_state_dict, v_lora_state_dict):
+        # TODO (Moin): generalize this abstraction later on
+
+        if self.merged:
+            raise RuntimeError(
+                "A LoRA is currently merged into the model. You should delete the active LoRA before merging this one.")
+
+        if self.merge_activations:
+            raise NotImplementedError(
+                "Merging LoRAs in activation space is currently unsupported.")
+
+            # (Moin): Leaving this comemnted for posterity + to fix later
+            # self.q_lora = LinearLoRALayer.from_state_dict(
+            # q_lora_state_dict).to("cuda").half()
+            # self.v_lora = LinearLoRALayer.from_state_dict(
+            # v_lora_state_dict).to("cuda").half()
+        else:
+            device = self.qkv_proj.weight.device
+
+            lora_B = q_lora_state_dict['loras']['lora_B.weight']
+            lora_A = q_lora_state_dict['loras']['lora_A.weight']
+            scaling = q_lora_state_dict['scaling']
+            q_lora = (lora_B @ lora_A) * scaling
+            self.q_lora = q_lora.to(device)
+
+            lora_B = v_lora_state_dict['loras']['lora_B.weight']
+            lora_A = v_lora_state_dict['loras']['lora_A.weight']
+            scaling = v_lora_state_dict['scaling']
+            v_lora = (lora_B @ lora_A) * scaling
+            self.v_lora = v_lora.to(device)
+
+            self.qkv_proj.weight.requires_grad = False
+            self.qkv_proj.weight[:q_lora.shape[0], :] += self.q_lora
+            self.qkv_proj.weight[-v_lora.shape[0]:, :] += self.v_lora
+            self.merged = True
+
+    def delete_lora(self):
+        if not self.merged:
+            raise RuntimeError("No LoRA is currently merged into the model.")
+
+        if self.merge_activations:
+            raise NotImplementedError(
+                "Merging LoRAs in activation space is currently unsupported.")
+            self.q_lora = None
+            self.v_lora = None
+        else:
+            # Leaving this other approach commented out
+            # This could yield floating point issues, so I wanted to avoid it for now
+            # self.qkv_proj.weight[:self.q_lora.shape[0], :] -= self.q_lora
+            # self.qkv_proj.weight[-self.v_lora.shape[0]:, :] -= self.v_lora
+            self.merged = False
+            self.qkv_proj.weight.data = self.cached_qkv_proj
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -143,6 +232,26 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # TODO (Moin): add the LoRA here
+        if self.merge_activations and self.q_lora is not None and self.v_lora is not None:
+            # matrix multiplies have the tendency to overflow, so we have to be careful about datatypes here
+            prev_q_dtype = q.dtype
+            prev_v_dtype = v.dtype
+            assert prev_q_dtype == self.q_lora.lora_A.weight.dtype
+            assert prev_q_dtype == self.q_lora.lora_B.weight.dtype
+
+            assert prev_v_dtype == self.v_lora.lora_A.weight.dtype
+            assert prev_v_dtype == self.v_lora.lora_B.weight.dtype
+
+            q = q.to(self.q_lora.lora_A.weight.dtype)
+            v = q.to(self.v_lora.lora_A.weight.dtype)
+
+            q += self.q_lora(q)
+            v += self.v_lora(v)
+
+            q = q.to(prev_q_dtype)
+            v = v.to(prev_v_dtype)
+
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
                                 input_metadata, cache_event)
@@ -292,6 +401,39 @@ class LlamaForCausalLM(nn.Module):
     _column_parallel_layers = []
     _row_parallel_layers = ["o_proj", "down_proj"]
 
+    def load_lora(self, lora_config, lora_state_dict):
+        # load configs, map to CPU in case # of GPUs is variable
+        if isinstance(lora_state_dict, str):
+            lora_state_dict = torch.load(lora_state_dict, map_location="cpu")
+
+        if isinstance(lora_config, str):
+            with open(lora_config, "r") as lora_config_file:
+                lora_config = json.load(lora_config_file)
+
+        # assemble the final state dict
+        dropout = lora_config['lora_dropout']
+        scaling = lora_config['lora_alpha'] / lora_config['r']
+        for layer_idx, layer in enumerate(self.model.layers):
+            q_lora_A_weight = lora_state_dict[
+                f'base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_A.weight']
+            q_lora_B_weight = lora_state_dict[
+                f'base_model.model.model.layers.{layer_idx}.self_attn.q_proj.lora_B.weight']
+            q_lora_state_dict = {"loras": {"lora_A.weight": q_lora_A_weight,
+                                           'lora_B.weight': q_lora_B_weight}, "scaling": scaling, "dropout": dropout}
+
+            v_lora_A_weight = lora_state_dict[
+                f'base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_A.weight']
+            v_lora_B_weight = lora_state_dict[
+                f'base_model.model.model.layers.{layer_idx}.self_attn.v_proj.lora_B.weight']
+            v_lora_state_dict = {"loras": {"lora_A.weight": v_lora_A_weight,
+                                           'lora_B.weight': v_lora_B_weight}, "scaling": scaling, "dropout": dropout}
+
+            layer.self_attn.load_lora(q_lora_state_dict, v_lora_state_dict)
+
+    def delete_lora(self):
+        for layer_idx, layer in enumerate(self.model.layers):
+            layer.self_attn.delete_lora()
+
     def load_weights(self,
                      model_name_or_path: str,
                      cache_dir: Optional[str] = None,
@@ -398,3 +540,9 @@ class LlamaForCausalLM(nn.Module):
                                          column_parallel_weights,
                                          row_parallel_weights,
                                          tensor_model_parallel_rank)
+
+        # cache the original qkv proj matricies for restoring the original model when deleting a lora
+        for layer_idx, layer in enumerate(self.model.layers):
+            layer.self_attn.cached_qkv_proj = layer.self_attn.qkv_proj.weight.data.clone()
+            assert torch.allclose(
+                layer.self_attn.cached_qkv_proj, layer.self_attn.qkv_proj.weight.data)

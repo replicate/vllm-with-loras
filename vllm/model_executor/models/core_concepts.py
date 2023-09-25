@@ -1,82 +1,32 @@
-# coding=utf-8
-# Adapted from
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-# Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
-#
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights.
-
-The input of the model is flattened to a 1D tensor of tokens. The model uses
-InputMetadata to extract the original 2D shape of the input.
-"""
-import json
-from typing import List, Optional, Tuple
-
-import torch
-from torch import nn
-from transformers import LlamaConfig
-from vllm.model_executor.input_metadata import InputMetadata
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttentionWithRoPE
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.sampler import Sampler
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.model_executor.parallel_utils.tensor_parallel import (
-    ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding)
-from vllm.model_executor.weight_utils import (
-    hf_model_weights_iterator, load_padded_tensor_parallel_vocab,
-    load_tensor_parallel_weights)
-from vllm.sequence import SamplerOutput
-
-KVCache = Tuple[torch.Tensor, torch.Tensor]
-
-
-class LlamaMLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-    ):
+class LinearLoRALayer(nn.Module):
+    def __init__(self, hidden_dim, rank, dropout, scaling):
         super().__init__()
-        self.gate_up_proj = ColumnParallelLinear(hidden_size,
-                                                 2 * intermediate_size,
-                                                 bias=False,
-                                                 gather_output=False,
-                                                 perform_initialization=False)
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           input_is_parallel=True,
-                                           perform_initialization=False)
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
+        self.lora_A = nn.Linear(hidden_dim, rank, bias=False)
+        self.lora_B = nn.Linear(rank, hidden_dim, bias=False)
+        self.scaling = scaling
+        if dropout > 0.0:
+            self.dropout = nn.Dropout(dropout)
+        else:
+            self.dropout = nn.Identity()
+
+    @classmethod
+    def from_state_dict(cls, state_dict):
+        expected_keys = set(['loras', 'dropout', 'scaling'])
+        if state_dict.keys() != expected_keys:
+            raise ValueError(
+                f"Expected keys {expected_keys}, got {state_dict.keys()}")
+
+        rank, hidden_dim = state_dict['loras']['lora_A.weight'].shape
+        dropout = state_dict['dropout']
+        scaling = state_dict['scaling']
+        lora_layer = cls(hidden_dim=hidden_dim, rank=rank,
+                         dropout=dropout, scaling=scaling)
+        lora_layer.load_state_dict(state_dict['loras'], strict=True)
+        return lora_layer
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+        return self.lora_B(self.lora_A(self.dropout(x))) * self.scaling
+
 
 class LlamaAttention(nn.Module):
 
@@ -217,100 +167,6 @@ class LlamaAttention(nn.Module):
                                 input_metadata, cache_event)
         output, _ = self.o_proj(attn_output)
         return output
-
-
-class LlamaDecoderLayer(nn.Module):
-
-    def __init__(self, config: LlamaConfig):
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
-        self.self_attn = LlamaAttention(
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-        )
-        self.mlp = LlamaMLP(
-            hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-        )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: KVCache,
-        input_metadata: InputMetadata,
-        cache_event: Optional[torch.cuda.Event],
-    ) -> torch.Tensor:
-        # Self Attention
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            input_metadata=input_metadata,
-            cache_event=cache_event,
-        )
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-        return hidden_states
-
-
-class LlamaModel(nn.Module):
-
-    def __init__(self, config: LlamaConfig):
-        super().__init__()
-        self.config = config
-        self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
-
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
-        self.embed_tokens = VocabParallelEmbedding(
-            vocab_size, config.hidden_size, perform_initialization=False)
-        self.layers = nn.ModuleList([
-            LlamaDecoderLayer(config) for _ in range(config.num_hidden_layers)
-        ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        kv_caches: List[KVCache],
-        input_metadata: InputMetadata,
-        cache_events: Optional[List[torch.cuda.Event]],
-    ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
-        for i in range(len(self.layers)):
-            if cache_events is None:
-                cache_event = None
-            else:
-                cache_event = cache_events[i]
-            layer = self.layers[i]
-            hidden_states = layer(
-                positions,
-                hidden_states,
-                kv_caches[i],
-                input_metadata,
-                cache_event,
-            )
-        hidden_states = self.norm(hidden_states)
-        return hidden_states
-
 
 class LoraLlamaForCausalLM(nn.Module):
 
