@@ -25,6 +25,7 @@
 The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
+import json
 from typing import List, Optional, Tuple
 
 import torch
@@ -433,6 +434,9 @@ class LlamaForCausalLM(nn.Module):
     def delete_lora(self):
         for layer_idx, layer in enumerate(self.model.layers):
             layer.self_attn.delete_lora()
+
+    def is_lora_active(self):
+        return all([layer.self_attn.merged for layer in self.model.layers])
 
     def load_weights(self,
                      model_name_or_path: str,
