@@ -174,8 +174,11 @@ class LlamaAttention(nn.Module):
         # TODO (Moin): generalize this abstraction later on
 
         if self.merged:
-            raise RuntimeError(
-                "A LoRA is currently merged into the model. You should delete the active LoRA before merging this one.")
+            print(
+                "A LoRA is currently merged into the model. Deleting the current lora to add a new one.")
+            self.delete_lora()
+            # raise RuntimeError(
+            # "A LoRA is currently merged into the model. You should delete the active LoRA before merging this one.")
 
         if self.merge_activations:
             raise NotImplementedError(
@@ -208,7 +211,7 @@ class LlamaAttention(nn.Module):
 
     def delete_lora(self):
         if not self.merged:
-            raise RuntimeError("No LoRA is currently merged into the model.")
+            print("Warning: delete_lora was called, but no LoRA is currently merged into the model. This will effectively do a no-op."))
 
         if self.merge_activations:
             raise NotImplementedError(

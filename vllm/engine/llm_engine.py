@@ -117,6 +117,9 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
 
+    def is_lora_active(self):
+        return all([worker.model.is_lora_active() for worker in self.workers])
+
     def load_lora(self, lora_config, lora_state_dict):
         for worker in self.workers:
             worker.model.load_lora(lora_config, lora_state_dict)

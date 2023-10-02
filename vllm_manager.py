@@ -30,7 +30,7 @@ async def _run_vllm(base_model_path: Path, lora_path: Path, prompt: str, max_new
 
     adapter_model = torch.load(
         lora_path / "adapter_model.bin", map_location="cpu")
-    print("Started loading lroa")
+    print("Started loading lora")
     engine.engine.load_lora(adapter_config, adapter_model)
     print("Finished loading lora")
 
