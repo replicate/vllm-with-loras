@@ -224,7 +224,7 @@ class LlamaAttention(nn.Module):
             # self.qkv_proj.weight[:self.q_lora.shape[0], :] -= self.q_lora
             # self.qkv_proj.weight[-self.v_lora.shape[0]:, :] -= self.v_lora
             self.merged = False
-            self.qkv_proj.weight.data = self.cached_qkv_proj
+            self.qkv_proj.weight.data = self.cached_qkv_proj.clone()
 
     def forward(
         self,
