@@ -220,8 +220,8 @@ class LlamaAttention(nn.Module):
             self.merged = True
 
     def delete_lora(self):
-        if not self.merged:
-            print("Warning: delete_lora was called, but no LoRA is currently merged into the model. This will effectively do a no-op.")
+        # if not self.merged:
+        #     print("Warning: delete_lora was called, but no LoRA is currently merged into the model. This will effectively do a no-op.")
 
         if self.merge_activations:
             raise NotImplementedError(
