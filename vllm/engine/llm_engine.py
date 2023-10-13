@@ -122,6 +122,14 @@ class LLMEngine:
         # List of (timestamp, num_tokens)
         self.num_generation_tokens: List[Tuple[float, int]] = []
 
+    def load_lora(self, lora_config_path, lora_state_dict_path):
+        for worker in self.workers:
+            worker.model.load_lora(lora_config_path, lora_state_dict_path)
+
+    def delete_lora(self):
+        for worker in self.workers:
+            worker.model.delete_lora()
+
     def _init_workers(self, distributed_init_method: str):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
         # before CUDA_VISIBLE_DEVICES is set in the Worker
